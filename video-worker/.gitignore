@@ -1,0 +1,28 @@
+# Virtual environment
+venv/
+.venv
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+.Python
+
+# Generated files
+outputs/
+*.mp4
+*.log
+
+# Models (large, should not commit)
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+
+# IDE
+.vscode/
+.idea/
+*.swp
