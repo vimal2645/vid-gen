@@ -1,15 +1,18 @@
-# video-worker/main.py - DUMMY VERSION (no dependencies issues)
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 import uuid
-import time
+import torch
 import os
-from pathlib import Path
-import subprocess
 
-app = FastAPI(title="Video Worker Service")
+# Disable xformers to avoid DLL issues on Windows
+os.environ["DISABLE_XFORMERS"] = "1"
+
+from diffusers import DiffusionPipeline
+from pathlib import Path
+
+app = FastAPI(title="🎬 Free AI Video Generator - ZeroScope")
 
 app.add_middleware(
     CORSMiddleware,
@@ -23,9 +26,30 @@ jobs_store = {}
 OUTPUT_DIR = Path("./outputs")
 OUTPUT_DIR.mkdir(exist_ok=True)
 
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+pipe = None
+
+def load_model():
+    """Load ZeroScope model"""
+    global pipe
+    if pipe is not None:
+        return
+    
+    print(f"📦 Loading ZeroScope model on {DEVICE}...")
+    try:
+        pipe = DiffusionPipeline.from_pretrained(
+            "cerspense/zeroscope_v2_576w",
+            torch_dtype=torch.float16 if DEVICE == "cuda" else torch.float32,
+        )
+        pipe = pipe.to(DEVICE)
+        print("✅ Model loaded!")
+    except Exception as e:
+        print(f"❌ Model load error: {e}")
+        raise
+
 class GenerateRequest(BaseModel):
     prompt: str
-    duration_seconds: int = 10
+    num_frames: int = 24
     job_id: Optional[str] = None
 
 class JobStatusResponse(BaseModel):
@@ -34,92 +58,92 @@ class JobStatusResponse(BaseModel):
     message: Optional[str] = None
     video_url: Optional[str] = None
 
-def create_dummy_mp4(output_path: str, duration_seconds: int = 5):
-    """Create a dummy black MP4 file for testing."""
-    try:
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-y",
-                "-f", "lavfi",
-                "-i", "color=c=black:s=640x360",
-                "-c:v", "libx264",
-                "-preset", "ultrafast",
-                "-t", str(min(duration_seconds, 10)),
-                output_path,
-            ],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
-    except Exception as e:
-        print(f"Error: {e}")
-        with open(output_path, "wb") as f:
-            f.write(b"")
-        return False
-
-def generate_video_background(job_id: str, prompt: str, duration_seconds: int):
-    """Background task to generate video."""
+def generate_video_background(job_id: str, prompt: str, num_frames: int):
+    """Generate video in background"""
     try:
         jobs_store[job_id]["status"] = "running"
-        jobs_store[job_id]["message"] = "Generating video..."
+        jobs_store[job_id]["message"] = "🤖 Loading model..."
         
-        time.sleep(3)
+        load_model()
         
-        output_file = OUTPUT_DIR / f"{job_id}.mp4"
-        success = create_dummy_mp4(str(output_file), duration_seconds)
+        jobs_store[job_id]["message"] = f"🎬 Generating {num_frames} frames..."
         
-        if success or output_file.exists():
-            video_url = f"http://localhost:8082/download/{job_id}"
-            jobs_store[job_id]["status"] = "done"
-            jobs_store[job_id]["message"] = "Video generated successfully"
-            jobs_store[job_id]["video_url"] = video_url
-            jobs_store[job_id]["video_path"] = str(output_file)
-        else:
-            jobs_store[job_id]["status"] = "failed"
-            jobs_store[job_id]["message"] = "Failed to generate video"
-    
+        with torch.no_grad():
+            result = pipe(
+                prompt,
+                negative_prompt="low quality, blurry",
+                num_frames=num_frames,
+                num_inference_steps=20,
+                guidance_scale=7.5,
+            )
+        
+        frames = result.frames[0]
+        
+        # Save as GIF
+        output_file = OUTPUT_DIR / f"{job_id}.gif"
+        frames[0].save(
+            str(output_file),
+            save_all=True,
+            append_images=frames[1:],
+            duration=100,
+            loop=0,
+        )
+        
+        jobs_store[job_id]["status"] = "done"
+        jobs_store[job_id]["message"] = "✅ Video ready!"
+        jobs_store[job_id]["video_url"] = f"/download/{job_id}"
+        jobs_store[job_id]["video_path"] = str(output_file)
+        
+        print(f"✅ Video generated: {job_id}")
+        
     except Exception as e:
         jobs_store[job_id]["status"] = "failed"
-        jobs_store[job_id]["message"] = str(e)
+        jobs_store[job_id]["message"] = f"❌ {str(e)[:50]}"
+        print(f"Error: {e}")
+
+@app.on_event("startup")
+async def startup():
+    print("🚀 Service starting...")
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "✅ OK",
+        "device": DEVICE,
+        "gpu": torch.cuda.is_available()
+    }
 
 @app.post("/generate")
-async def generate_video(payload: GenerateRequest, background_tasks: BackgroundTasks):
-    """Submit a video generation job."""
+async def generate(payload: GenerateRequest, bg: BackgroundTasks):
+    """Submit video generation job"""
     job_id = payload.job_id or str(uuid.uuid4())
     prompt = payload.prompt.strip()
     
     if not prompt:
-        raise HTTPException(status_code=400, detail="Prompt cannot be empty")
+        raise HTTPException(status_code=400, detail="Prompt required")
+    
+    num_frames = max(8, min(payload.num_frames, 48))
     
     jobs_store[job_id] = {
         "status": "queued",
-        "message": "Job created",
+        "message": "⏳ Queued...",
         "prompt": prompt,
-        "duration_seconds": payload.duration_seconds,
         "video_url": None,
         "video_path": None,
     }
     
-    background_tasks.add_task(
-        generate_video_background,
-        job_id,
-        prompt,
-        payload.duration_seconds
-    )
+    bg.add_task(generate_video_background, job_id, prompt, num_frames)
     
-    return {"job_id": job_id}
+    return {
+        "job_id": job_id,
+        "message": "📹 Generation started",
+        "status_url": f"/status/{job_id}"
+    }
 
 @app.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_status(job_id: str):
-    """Get job status."""
+    """Get job status"""
     job = jobs_store.get(job_id)
-    
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     
@@ -131,33 +155,35 @@ async def get_status(job_id: str):
     )
 
 @app.get("/download/{job_id}")
-async def download_video(job_id: str):
-    """Download the generated video file."""
+async def download(job_id: str):
+    """Download video"""
     from fastapi.responses import FileResponse
     
     job = jobs_store.get(job_id)
-    
     if not job or job["status"] != "done":
-        raise HTTPException(status_code=404, detail="Video not available")
+        raise HTTPException(status_code=404, detail="Video not ready")
     
-    video_path = job.get("video_path")
-    if not video_path or not Path(video_path).exists():
-        raise HTTPException(status_code=404, detail="Video file not found")
+    video_path = Path(job.get("video_path"))
+    if not video_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
     
     return FileResponse(
         video_path,
-        media_type="video/mp4",
-        filename=f"{job_id}.mp4"
+        media_type="image/gif",
+        filename=f"{job_id}.gif"
     )
 
 @app.get("/")
 async def root():
     return {
-        "service": "video-worker",
+        "service": "🎬 ZeroScope AI Video Generator",
+        "model": "cerspense/zeroscope_v2_576w",
+        "device": DEVICE,
         "endpoints": {
-            "POST /generate": "Submit a video generation job",
-            "GET /status/{job_id}": "Get job status",
+            "POST /generate": "Generate video",
+            "GET /status/{job_id}": "Check status",
             "GET /download/{job_id}": "Download video",
+            "GET /health": "Health check"
         }
     }
 
