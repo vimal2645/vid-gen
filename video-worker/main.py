@@ -5,12 +5,12 @@ from typing import Optional
 import uuid
 import torch
 import os
+from pathlib import Path
 
 # Disable xformers to avoid DLL issues on Windows
 os.environ["DISABLE_XFORMERS"] = "1"
 
 from diffusers import DiffusionPipeline
-from pathlib import Path
 
 app = FastAPI(title="🎬 Free AI Video Generator - ZeroScope")
 
@@ -28,6 +28,7 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 pipe = None
+
 
 def load_model():
     """Load ZeroScope model"""
@@ -47,16 +48,19 @@ def load_model():
         print(f"❌ Model load error: {e}")
         raise
 
+
 class GenerateRequest(BaseModel):
     prompt: str
     num_frames: int = 24
     job_id: Optional[str] = None
+
 
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
     message: Optional[str] = None
     video_url: Optional[str] = None
+
 
 def generate_video_background(job_id: str, prompt: str, num_frames: int):
     """Generate video in background"""
@@ -101,9 +105,11 @@ def generate_video_background(job_id: str, prompt: str, num_frames: int):
         jobs_store[job_id]["message"] = f"❌ {str(e)[:50]}"
         print(f"Error: {e}")
 
+
 @app.on_event("startup")
 async def startup():
     print("🚀 Service starting...")
+
 
 @app.get("/health")
 async def health():
@@ -112,6 +118,7 @@ async def health():
         "device": DEVICE,
         "gpu": torch.cuda.is_available()
     }
+
 
 @app.post("/generate")
 async def generate(payload: GenerateRequest, bg: BackgroundTasks):
@@ -140,6 +147,7 @@ async def generate(payload: GenerateRequest, bg: BackgroundTasks):
         "status_url": f"/status/{job_id}"
     }
 
+
 @app.get("/status/{job_id}", response_model=JobStatusResponse)
 async def get_status(job_id: str):
     """Get job status"""
@@ -153,6 +161,7 @@ async def get_status(job_id: str):
         message=job.get("message"),
         video_url=job.get("video_url"),
     )
+
 
 @app.get("/download/{job_id}")
 async def download(job_id: str):
@@ -173,6 +182,7 @@ async def download(job_id: str):
         filename=f"{job_id}.gif"
     )
 
+
 @app.get("/")
 async def root():
     return {
@@ -186,6 +196,7 @@ async def root():
             "GET /health": "Health check"
         }
     }
+
 
 if __name__ == "__main__":
     import uvicorn
